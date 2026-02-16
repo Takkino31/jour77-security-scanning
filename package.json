@@ -1,19 +1,18 @@
 {
   "name": "jour77-security-scanning",
   "version": "1.0.0",
-  "description": "Security scanning demo with vulnerabilities",
+  "description": "Security scanning demo",
   "main": "src/index.js",
   "scripts": {
     "start": "node src/index.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "audit": "npm audit --json",
-    "audit:fix": "npm audit fix"
+    "audit": "npm audit --json"
   },
   "dependencies": {
-    "express": "4.16.0",
-    "lodash": "4.17.15",
-    "axios": "0.19.0"
+    "express": "4.18.2",
+    "lodash": "4.17.21",
+    "axios": "1.6.0"
   },
   "devDependencies": {
     "jest": "^29.0.0",
