@@ -1,9 +1,9 @@
-FROM node:14-alpine  # Version Alpine ancienne avec vulnérabilités
+FROM node:14-alpine
 
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
 COPY . .
 

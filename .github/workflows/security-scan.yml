@@ -1,0 +1,196 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 2 * * *'  # Scan quotidien à 2h du matin
+
+jobs:
+  # --------------------------------------------
+  # JOB 1: SCAN DES DÉPENDANCES (SCA)
+  # --------------------------------------------
+  dependency-scan:
+    name: 📦 Dependency Scan (SCA)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '18'
+    
+    - name: Install dependencies
+      run: npm ci
+    
+    - name: Run npm audit
+      id: audit
+      run: |
+        npm audit --json > npm-audit.json || true
+        # npm audit retourne non-zero si des vulnérabilités sont trouvées
+        # On continue malgré l'erreur pour capturer le rapport
+    
+    - name: Parse npm audit results
+      run: |
+        # Extraire les vulnérabilités critiques
+        CRITICAL=$(jq '.metadata.vulnerabilities.critical // 0' npm-audit.json)
+        HIGH=$(jq '.metadata.vulnerabilities.high // 0' npm-audit.json)
+        MODERATE=$(jq '.metadata.vulnerabilities.moderate // 0' npm-audit.json)
+        LOW=$(jq '.metadata.vulnerabilities.low // 0' npm-audit.json)
+        
+        echo "📊 npm audit results:"
+        echo "  Critical: $CRITICAL"
+        echo "  High: $HIGH"
+        echo "  Moderate: $MODERATE"
+        echo "  Low: $LOW"
+        
+        # Bloquer si des vulnérabilités critiques existent
+        if [ "$CRITICAL" -gt 0 ]; then
+          echo "❌ CRITICAL vulnerabilities found! Blocking pipeline."
+          exit 1
+        fi
+        
+        # Warning si des vulnérabilités hautes existent
+        if [ "$HIGH" -gt 0 ]; then
+          echo "⚠️ HIGH vulnerabilities found. Continue but investigate."
+        fi
+    
+    - name: Upload npm audit report
+      uses: actions/upload-artifact@v4
+      with:
+        name: npm-audit-report
+        path: npm-audit.json
+        retention-days: 30
+
+  # --------------------------------------------
+  # JOB 2: SCAN DE L'IMAGE DOCKER (CONTAINER)
+  # --------------------------------------------
+  container-scan:
+    name: 🐳 Container Scan (Trivy)
+    runs-on: ubuntu-latest
+    needs: dependency-scan
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Build Docker image
+      run: |
+        docker build -t vulnerable-app:${{ github.sha }} .
+    
+    - name: Run Trivy vulnerability scanner
+      id: trivy
+      uses: aquasecurity/trivy-action@master
+      with:
+        image-ref: 'vulnerable-app:${{ github.sha }}'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+        severity: 'CRITICAL,HIGH'  # Seulement ces sévérités
+        ignore-unfixed: true  # Ignorer les vulnérabilités sans correctif
+    
+    - name: Upload Trivy results to GitHub Security
+      uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+    
+    - name: Run Trivy with custom exit code
+      id: trivy-exit
+      run: |
+        # Exécuter Trivy et capturer le code de sortie
+        trivy image --severity CRITICAL --exit-code 1 --ignore-unfixed vulnerable-app:${{ github.sha }}
+        EXIT_CODE=$?
+        
+        if [ $EXIT_CODE -eq 1 ]; then
+          echo "❌ CRITICAL vulnerabilities found in container image!"
+          exit 1
+        else
+          echo "✅ No critical vulnerabilities found"
+        fi
+    
+    - name: Generate detailed Trivy report
+      run: |
+        trivy image --format json --output trivy-full.json vulnerable-app:${{ github.sha }}
+    
+    - name: Upload Trivy full report
+      uses: actions/upload-artifact@v4
+      with:
+        name: trivy-report
+        path: |
+          trivy-results.sarif
+          trivy-full.json
+        retention-days: 30
+    
+    - name: Generate SBOM with Trivy
+      run: |
+        trivy image --format cyclonedx --output sbom.cyclonedx.json vulnerable-app:${{ github.sha }}
+    
+    - name: Upload SBOM
+      uses: actions/upload-artifact@v4
+      with:
+        name: sbom
+        path: sbom.cyclonedx.json
+        retention-days: 90  # Longue durée pour audit
+
+  # --------------------------------------------
+  # JOB 3: SCAN DU CODE (SAST SIMPLE)
+  # --------------------------------------------
+  code-scan:
+    name: 🔍 Code Scan (SAST)
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Run Trivy filesystem scan
+      run: |
+        trivy fs --severity CRITICAL,HIGH --exit-code 1 --ignore-unfixed .
+    
+    - name: Generate filesystem report
+      run: |
+        trivy fs --format json --output trivy-fs.json .
+    
+    - name: Upload filesystem scan report
+      uses: actions/upload-artifact@v4
+      with:
+        name: trivy-fs-report
+        path: trivy-fs.json
+        retention-days: 30
+
+  # --------------------------------------------
+  # JOB 4: RAPPORT DE SYNTHÈSE
+  # --------------------------------------------
+  security-summary:
+    name: 📊 Security Summary
+    runs-on: ubuntu-latest
+    needs: [dependency-scan, container-scan, code-scan]
+    if: always()
+    
+    steps:
+    - name: Generate summary
+      run: |
+        echo "## 🔒 Security Scanning Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "| Scan Type | Status |" >> $GITHUB_STEP_SUMMARY
+        echo "|-----------|--------|" >> $GITHUB_STEP_SUMMARY
+        echo "| 📦 Dependency Scan (npm audit) | ${{ needs.dependency-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🐳 Container Scan (Trivy) | ${{ needs.container-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "| 🔍 Code Scan (Trivy fs) | ${{ needs.code-scan.result }} |" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Trigger**: ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+    
+    - name: Final status
+      run: |
+        if [[ "${{ needs.container-scan.result }}" == "failure" ]]; then
+          echo "❌ Security scan failed: Critical vulnerabilities found"
+          exit 1
+        else
+          echo "✅ Security scans passed or no critical issues"
+        fi
